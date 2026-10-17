@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Tag Scanner</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f5f5f7;
+    color: #1d1d1f;
+    margin: 0;
+    padding: 16px;
+    line-height: 1.5;
+  }
+  .container { max-width: 500px; margin: 0 auto; }
+  h1 { font-size: 20px; text-align: center; margin-bottom: 24px; font-weight: 600; }
+  .section { background: #fff; border-radius: 16px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .section label { display: block; font-size: 13px; font-weight: 600; color: #6e6e73; margin-bottom: 8px; }
+  input[type="file"] { width: 100%; font-size: 16px; }
+  #preview { width: 100%; height: auto; border-radius: 12px; margin-top: 8px; display: none; border: 1px solid #e5e5ea; }
+  button {
+    width: 100%; padding: 14px; border: none; border-radius: 12px; font-size: 16px; font-weight: 600;
+    cursor: pointer; background: #007aff; color: #fff; margin-top: 8px;
+  }
+  button:disabled { background: #c7c7cc; cursor: not-allowed; }
+  button.secondary { background: #f2f2f7; color: #1d1d1f; }
+  .field { margin-bottom: 12px; }
+  .field input { width: 100%; padding: 10px; border: 1px solid #d1d1d6; border-radius: 8px; font-size: 16px; background: #fff; }
+  textarea { width: 100%; padding: 10px; border: 1px solid #d1d1d6; border-radius: 8px; font-size: 14px; font-family: monospace; background: #fff; resize: vertical; }
+  #status { margin-top: 12px; font-size: 14px; min-height: 20px; }
+  .ok { color: #34c759; font-weight: 600; }
+  .err { color: #ff3b30; font-weight: 600; }
+  .raw-hint { font-size: 12px; color: #8e8e93; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>📷 Tag Scanner</h1>
+
+  <div class="section">
+    <label>1. Take or choose photo</label>
+    <input type="file" id="fileInput" accept="image/*" capture="environment">
+    <img id="preview">
+  </div>
+
+  <div class="section">
+    <label>2. Extract text with OCR</label>
+    <button id="scanBtn" class="secondary" disabled>Scan image</button>
+  </div>
+
+  <div class="section" id="resultSection" style="display:none;">
+    <label>3. Review & edit (OCR isn't perfect)</label>
+
+    <div class="field">
+      <label>Modelo</label>
+      <input type="text" id="fModelo" placeholder="Modelo">
+    </div>
+    <div class="field">
+      <label>Size / Medida</label>
+      <input type="text" id="fMedida" placeholder="18x8 1/2 J">
+    </div>
+    <div class="field">
+      <label>Offset</label>
+      <input type="text" id="fOffset" placeholder="45">
+    </div>
+    <div class="field">
+      <label>CB</label>
+      <input type="text" id="fCB" placeholder="72.6">
+    </div>
+    <div class="field">
+      <label>Hole x PCD</label>
+      <input type="text" id="fPCD" placeholder="5x120">
+    </div>
+    <div class="field">
+      <label>Color</label>
+      <input type="text" id="fColor" placeholder="Silver Metallic">
+    </div>
+
+    <textarea id="rawText" rows="5" placeholder="Raw OCR output will appear here..."></textarea>
+    <div class="raw-hint">Tip: If a field is wrong, tap it and fix it before sending.</div>
+
+    <button id="sendBtn">Send to Google Sheets</button>
+    <div id="status"></div>
+  </div>
+</div>
+
+<script>
+// ==================== CONFIGURE THESE ====================
+// Get a free API key at https://ocr.space/ocrapi (free tier: 25k requests/month)
+// 'helloworld' is a public demo key — good for testing, but rate-limited
+const OCR_API_KEY = 'K81334742688957';  // <-- replace with your own key
+
+// Deploy apps-script.gs as a web app and paste the Deployment URL here
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec';
+// =========================================================
+
+const fileInput = document.getElementById('fileInput');
+const preview = document.getElementById('preview');
+const scanBtn = document.getElementById('scanBtn');
+const resultSection = document.getElementById('resultSection');
+const rawText = document.getElementById('rawText');
+const sendBtn = document.getElementById('sendBtn');
+const status = document.getElementById('status');
+
+const fields = [
+  { id: 'fModelo', patterns: [/Modelo[:\s]*(.+)/i] },
+  { id: 'fMedida', patterns: [/Size\s*\/\s*Medida[:\s]*(.+)/i, /Medida[:\s]*(.+)/i] },
+  { id: 'fOffset', patterns: [/Offset[:\s]*([\d.,]+)/i] },
+  { id: 'fCB', patterns: [/CB[:\s]*([\d.,]+)/i] },
+  { id: 'fPCD', patterns: [/Hole\s*x\s*PCD[:\s]*(.+)/i, /PCD[:\s]*(.+)/i] },
+  { id: 'fColor', patterns: [/Color[:\s]*(.+)/i] },
+];
+
+function extract(text, patterns) {
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m && m[1]) return m[1].trim();
+  }
+  return '';
+}
+
+fileInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  preview.src = url;
+  preview.style.display = 'block';
+  scanBtn.disabled = false;
+  resultSection.style.display = 'none';
+  status.textContent = '';
+});
+
+scanBtn.addEventListener('click', async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  scanBtn.disabled = true;
+  scanBtn.textContent = 'Scanning...';
+  status.textContent = '';
+
+  try {
+    const formData = new FormData();
+    formData.append('apikey', OCR_API_KEY);
+    formData.append('file', file);
+    formData.append('OCREngine', '2');
+
+    const res = await fetch('https://api.ocr.space/parse/image', {
+      method: 'POST',
+      body: formData
+    });
+    const data = await res.json();
+
+    if (data.ErrorMessage) throw new Error(data.ErrorMessage);
+    if (!data.Results || data.Results.length === 0) throw new Error('No text recognized');
+
+    const text = data.Results[0].ParsedText;
+    rawText.value = text;
+
+    fields.forEach(f => {
+      document.getElementById(f.id).value = extract(text, f.patterns) || '';
+    });
+
+    resultSection.style.display = 'block';
+    resultSection.scrollIntoView({ behavior: 'smooth' });
+  } catch (err) {
+    status.innerHTML = `<span class="err">OCR error: ${err.message}</span>`;
+  } finally {
+    scanBtn.disabled = false;
+    scanBtn.textContent = 'Scan image';
+  }
+});
+
+sendBtn.addEventListener('click', async () => {
+  const payload = {
+    timestamp: new Date().toISOString(),
+    modelo: document.getElementById('fModelo').value,
+    medida: document.getElementById('fMedida').value,
+    offset: document.getElementById('fOffset').value,
+    cb: document.getElementById('fCB').value,
+    pcd: document.getElementById('fPCD').value,
+    color: document.getElementById('fColor').value,
+  };
+
+  if (APPS_SCRIPT_URL.includes('YOUR_DEPLOYMENT_ID')) {
+    status.innerHTML = '<span class="err">Please set your APPS_SCRIPT_URL in index.html</span>';
+    return;
+  }
+
+  sendBtn.disabled = true;
+  sendBtn.textContent = 'Sending...';
+  status.textContent = '';
+
+  try {
+    const res = await fetch(APPS_SCRIPT_URL, {
+      method: 'POST',
+      mode: 'cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const result = await res.json();
+
+    if (result.success) {
+      status.innerHTML = '<span class="ok">✓ Sent to Google Sheets</span>';
+      fields.forEach(f => document.getElementById(f.id).value = '');
+      rawText.value = '';
+      if (preview.src) {
+        URL.revokeObjectURL(preview.src);
+        preview.src = '';
+      }
+      preview.style.display = 'none';
+      fileInput.value = '';
+      scanBtn.disabled = true;
+      resultSection.style.display = 'none';
+    } else {
+      throw new Error(result.error || 'Unknown error');
+    }
+  } catch (err) {
+    status.innerHTML = `<span class="err">Send failed: ${err.message}</span>`;
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Send to Google Sheets';
+  }
+});
+</script>
+
+</body>
+</html>
